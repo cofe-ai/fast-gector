@@ -42,13 +42,13 @@ Note: To make it faster and more readable, we remove allennlp dependencies and r
 ## Train Model
 - Edit deepspeed_config.json according to your config params. Note that lr and batch_size options will be overrided by args
    ```bash
-   bash train.sh
+   bash scripts/train.sh
    ```
 
 ## Inference
 - Edit deepspeed_config.json according to your config params
     ```bash
-    bash predict.sh
+    bash scripts/predict.sh
     ```
 
 ## Reference
