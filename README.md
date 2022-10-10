@@ -1,7 +1,7 @@
 # FastGECToR
 
 ## Introduction
-A faster and simpler implementation of [GECToR – Grammatical Error Correction: Tag, Not Rewrite](https://aclanthology.org/2020.bea-1.16/) with amp and distributed support by deepspeed. 
+A faster and simpler implementation of [GECToR – Grammatical Error Correction: Tag, Not Rewrite](https://github.com/grammarly/gector) with amp and distributed support by deepspeed. 
 
 Note: To make it faster and more readable, we remove allennlp dependencies and reconstruct related codes.
 
