@@ -34,13 +34,13 @@ Note: To make it faster and more readable, we remove allennlp dependencies and r
 
 2. Generate edits from parallel sents
     ```bash
-    python utils/preprocess_data.py -s source_file -t target_file -o output_edit_file
+    bash scripts/prepare_data.sh
     ```
 
 3. \*(Optional) Define your own target vocab (data/vocabulary/labels.txt)
 
 ## Train Model
-- Edit deepspeed_config.json according to your config params. Note that lr and batch_size options will be overrided by args
+- Edit deepspeed_config.json according to your config params. Note that lr and batch_size options will be overrided by args. And args.lr indicates batch_size (regardless how many gpus are used, which equals effective_batch_size_per_gpu * num_gpus) * num accumulation steps. See more details at src/trainer.py.
    ```bash
    bash scripts/train.sh
    ```
@@ -50,6 +50,9 @@ Note: To make it faster and more readable, we remove allennlp dependencies and r
     ```bash
     bash scripts/predict.sh
     ```
+
+## Known Issues
+- In distributed training (num gpu > 1), enable AMP with O1 state may raise ZeroDivision Error, which may be caused by apex, see APEX's github issues for help. Or, you can try a smaller lr to see if the error disappears.
 
 ## Reference
 [1] Omelianchuk, K., Atrasevych, V., Chernodub, A., & Skurzhanskyi, O. (2020). GECToR -- Grammatical Error Correction: Tag, Not Rewrite. arXiv:2005.12592 [cs]. http://arxiv.org/abs/2005.12592
