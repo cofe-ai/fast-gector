@@ -14,8 +14,7 @@ if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument(
         "--config_path", help="path to deepspeed config json", default="./deepspeed_config.json")
-    parser.add_argument("--local_rank", default=0)
-    parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--local_rank", type=int, default=-1)
     parser.add_argument("--max_len", type=int, default=128)
     parser.add_argument("--max_pieces_per_token", type=int, default=5)
     parser.add_argument("--train_batch_size", type=int, required=True)
@@ -27,6 +26,7 @@ if __name__ == "__main__":
     parser.add_argument("--additional_confidence", type=float, default=0.0)
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--cold_lr", type=float, default=1e-3)
+    parser.add_argument("--warmup", type=float, default=0.1)
     parser.add_argument("--dp_rate", type=float, default=0.0)
     parser.add_argument("--cold_step_count", type=int, default=0)
     parser.add_argument("--sub_token_mode", type=str, default="average")
@@ -49,7 +49,14 @@ if __name__ == "__main__":
     parser.add_argument("--ckpt_id", type=str, default=None)
     parser.add_argument("--save_dir", type=str, required=True)
     parser.add_argument("--pretrained_transformer_path",
-                        type=str, required=True)
-    args = parser.parse_args()
+                        type=str, required=True)   
+    parser.add_argument("--log_interval", type=int, default=10)
     parser = deepspeed.add_config_arguments(parser)
+    parser.add_argument("--wandb", action="store_true", help="use wandb logger")
+    parser.add_argument("--wandb_key", type=str, default="", help="wandb key to login")
+    args = parser.parse_args()
+    if args.wandb:
+        if args.wandb_key:
+            import wandb
+            wandb.login(key=args.wandb_key)
     main(args)

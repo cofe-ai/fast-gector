@@ -1,6 +1,7 @@
 # -*- coding:UTF-8 -*-
 import torch
 from transformers import AutoTokenizer
+from transformers.optimization import get_linear_schedule_with_warmup
 from utils.mismatched_utils import *
 from utils.common_utils import init_dataloader, read_config, torch_distributed_master_process_first
 from src.dataset import Seq2EditVocab
@@ -12,16 +13,19 @@ from random import seed
 import os
 import json
 import deepspeed
-
+import wandb
 
 class Trainer:
     def __init__(self, args):
+
         self.use_amp = args.amp
         self.fix_seed()
-        self.device = args.device if args.device else (
-            "cuda" if torch.cuda.is_available() else "cpu")
-        print(f"use device: {self.device}")
         deepspeed.init_distributed()
+        self.device = self.setup_device(args.local_rank)
+        self.log_interval = args.log_interval
+        if args.wandb:
+            self.use_wandb = True
+            wandb.init(project="gec", group="ddp")
         self.num_epochs = args.num_epochs
         self.train_batch_size = args.train_batch_size
         self.valid_batch_size = args.valid_batch_size
@@ -107,6 +111,32 @@ class Trainer:
                 tn_prob=self.tn_prob)
             print("dev set: ", len(self.valid_loader.dataset))
 
+
+
+        
+        self.model, self.optimizer, self.lr_scheduler = \
+            self.setup_model_optimizer_and_scheduler(
+                                                    model=model, 
+                                                    config=config, 
+                                                    num_steps_per_epoch=len(self.train_loader), 
+                                                    warmup=args.warmup)
+        
+        self.best_accuracy = 0
+        self.best_epoch = 0
+        self.best_loss = float("inf")
+
+    def setup_device(self, local_rank=-1):
+        if torch.cuda.is_available():
+            if torch.distributed.is_initialized() and local_rank != -1:
+                device = torch.device("cuda", local_rank)
+            else:
+                device = torch.device("cuda")
+        else:
+            device = torch.device("cpu")
+        print(f"setup device: {device}")
+        return device
+
+    def modify_ds_config(self, args):
         config = read_config(args.config_path)
         # total_batch_size = batch_size_per_gpu * accum_size * num_gpus
         config["train_batch_size"] = self.train_batch_size * \
@@ -114,11 +144,26 @@ class Trainer:
         config["gradient_accumulation_steps"] = args.accumulation_size
         config["optimizer"]["params"]["lr"] = args.lr
         config["amp"]["enabled"] = self.use_amp
+        return config
 
-        self.scheduler = None
-        self.model, self.optimizer, _, self.scheduler = deepspeed.initialize(model=model,
+    def init_scheduler(self, optimizer, num_steps_per_epoch, warmup_ratio):
+        total_train_steps = num_steps_per_epoch * self.num_epochs
+        lr_scheduler = get_linear_schedule_with_warmup(
+            optimizer=optimizer,
+            num_warmup_steps=total_train_steps * warmup_ratio,
+            num_training_steps=total_train_steps,
+        )
+        print("setup lr_scheduler")
+        return lr_scheduler
+
+    def setup_model_optimizer_and_scheduler(self, model, config, num_steps_per_epoch, warmup):
+        model, optimizer, _, _ = deepspeed.initialize(model=model,
                                                                              model_parameters=model.parameters(),
                                                                              config=config)
+        lr_scheduler = self.init_scheduler(optimizer=optimizer,
+                                        num_steps_per_epoch=num_steps_per_epoch,
+                                        warmup_ratio=warmup)
+        # load ckpt and reset lr
         if self.model_dir and self.ckpt_id:
             self.model.load_checkpoint(self.model_dir, self.ckpt_id)
             print(f"load model from {self.model_dir}")
@@ -127,10 +172,7 @@ class Trainer:
 
         else:
             print("no model checkpoint found, train from beginning...")
-
-        self.best_accuracy = 0
-        self.best_epoch = 0
-        self.best_loss = float("inf")
+        return model, optimizer, lr_scheduler
 
     def train(self):
         if not os.path.exists(self.save_dir):
@@ -162,6 +204,7 @@ class Trainer:
                 self.model.eval()
 
                 valid_loss, valid_acc = self._valid_epoch()
+                wandb.log({"valid loss": valid_loss, "valid acc": valid_acc})
                 with torch_distributed_master_process_first(torch.distributed.get_rank()):
                     metrics = self.eval_model(
                         epoch, train_loss, valid_loss, valid_acc)
@@ -183,18 +226,35 @@ class Trainer:
 
     def _train_epoch(self):
         epoch_loss = 0
+        num_steps_per_epoch = len(self.train_loader)
         pbar = tqdm(self.train_loader)
-        for batch in pbar:
+        
+        for step, batch in enumerate(pbar):
             for k, v in batch.items():
-                batch[k] = v.cuda()
+                batch[k] = v.to(self.device)
             outputs = self.model(batch, self.encoder_requires_grad)
             loss = outputs["loss"]
             self.model.backward(loss)
-            # call optimizer.step() and lr_scheduler.step()
             self.model.step()
             loss_i = loss.detach().item()
-            pbar.set_postfix({'loss': loss_i})
             epoch_loss += loss_i
+            if self.model.is_gradient_accumulation_boundary():
+                if self.encoder_requires_grad == True:
+                    self.lr_scheduler.step()
+                    current_lr = self.lr_scheduler.get_last_lr()[0]
+                else:
+                    current_lr = self.cold_lr
+                
+                if step % self.log_interval == 0 or step == num_steps_per_epoch - 1:
+                    info = {'loss': loss_i, 'lr': current_lr}
+                    pbar.set_postfix(info)
+                    if step == num_steps_per_epoch - 1:
+                        update_steps = step % self.log_interval
+                    else:
+                        update_steps = self.log_interval
+                    pbar.update(update_steps)
+                    if self.use_wandb:
+                        wandb.log(info)
         epoch_loss /= len(self.train_loader)
         return epoch_loss
 
@@ -226,7 +286,7 @@ class Trainer:
         with torch.no_grad():
             for batch in tqdm(self.valid_loader):
                 for k, v in batch.items():
-                    batch[k] = v.cuda()
+                    batch[k] = v.to(self.device)
                 outputs = self.model(batch)
 
                 loss = outputs["loss"]
