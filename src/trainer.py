@@ -112,7 +112,7 @@ class Trainer:
             print("dev set: ", len(self.valid_loader.dataset))
 
 
-
+        config = self.modify_ds_config(args)
         
         self.model, self.optimizer, self.lr_scheduler = \
             self.setup_model_optimizer_and_scheduler(
