@@ -28,7 +28,6 @@ class SeqEncoder(nn.Module):
             attention_mask=input_dict["attention_mask"],
         )
         last_hidden_states = output_dict[0]
-
         word_embeddings = self.mismatched_embedder.get_mismatched_embeddings(
             last_hidden_states,
             offsets=input_dict["offsets"],
@@ -75,13 +74,12 @@ class GECToRModel(nn.Module):
 
         correct_logits = self.correct_proj_layer(self.dropout(embeddings))
         detect_logits = self.detect_proj_layer(embeddings)
-
         correct_probs = F.softmax(correct_logits, dim=-1)
         detect_probs = F.softmax(detect_logits, dim=-1)
         # shape: (bsz, seq_len)
         detect_incorrect_probs = detect_probs[:, :,
                                               self.detect_incorrect_id] * input_dict["word_mask"]
-        # shape: (bsz, ), 句子中incorrect标签的最大的概率
+        # shape: (bsz, ), max prob of incorrect tag in a sequence
         max_incorrect_probs = torch.max(detect_incorrect_probs, dim=-1).values
         if self.additional_confidence != 0:
             correct_probs_change = torch.zeros(
@@ -89,7 +87,6 @@ class GECToRModel(nn.Module):
             correct_probs_change[:, :,
                                  self.correct_keep_id] = self.additional_confidence
             correct_probs += correct_probs_change
-
         total_loss = None
         if "detect_tag_ids" in input_dict and "correct_tag_ids" in input_dict:
             correct_tag_target_ids = input_dict["correct_tag_ids"]
@@ -98,6 +95,7 @@ class GECToRModel(nn.Module):
                 correct_logits.view(-1, self.num_correct_tags), correct_tag_target_ids.view(-1))
             detect_loss = self.detect_loss_fn(
                 detect_logits.view(-1, self.num_detect_tags), detect_tag_target_ids.view(-1))
+
             total_loss = correct_loss + detect_loss
         output_dict = {"logits_labels": correct_logits,
                        "logits_d_tags": detect_logits,

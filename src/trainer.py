@@ -165,9 +165,9 @@ class Trainer:
                                         warmup_ratio=warmup)
         # load ckpt and reset lr
         if self.model_dir and self.ckpt_id:
-            self.model.load_checkpoint(self.model_dir, self.ckpt_id)
+            model.load_checkpoint(self.model_dir, self.ckpt_id)
             print(f"load model from {self.model_dir}")
-            for param_group in self.optimizer.param_groups:
+            for param_group in optimizer.param_groups:
                 param_group['lr'] = self.lr
 
         else:
@@ -233,7 +233,11 @@ class Trainer:
             for k, v in batch.items():
                 batch[k] = v.to(self.device)
             outputs = self.model(batch, self.encoder_requires_grad)
+
             loss = outputs["loss"]
+            # TODO: figure out why nan loss encountered using amp in distributed training
+            if torch.isnan(loss):
+                continue
             self.model.backward(loss)
             self.model.step()
             loss_i = loss.detach().item()
