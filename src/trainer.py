@@ -74,6 +74,7 @@ class Trainer:
         self.train_loader = init_dataloader(
             subset="train",
             data_path=self.train_path,
+            num_workers=args.num_workers,
             use_cache=self.use_cache,
             tokenizer=self.mismatched_tokenizer,
             vocab=self.vocab,
@@ -93,9 +94,10 @@ class Trainer:
         self.valid_loader = None
         if args.do_eval:
             self.valid_loader = init_dataloader(
-                subset="train",
+                subset="valid",
                 data_path=self.valid_path,
                 use_cache=self.use_cache,
+                num_workers=args.num_workers,
                 tokenizer=self.mismatched_tokenizer,
                 vocab=self.vocab,
                 input_pad_id=self.base_tokenizer.pad_token_id,
@@ -236,8 +238,6 @@ class Trainer:
 
             loss = outputs["loss"]
             # TODO: figure out why nan loss encountered using amp in distributed training
-            if torch.isnan(loss):
-                continue
             self.model.backward(loss)
             self.model.step()
             loss_i = loss.detach().item()
@@ -292,7 +292,6 @@ class Trainer:
                 for k, v in batch.items():
                     batch[k] = v.to(self.device)
                 outputs = self.model(batch)
-
                 loss = outputs["loss"]
                 loss = loss / torch.distributed.get_world_size()
                 epoch_loss += loss.detach().item()

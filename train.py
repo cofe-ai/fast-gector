@@ -43,6 +43,7 @@ if __name__ == "__main__":
     parser.add_argument("--valid_path", type=str, required=False)
     parser.add_argument("--use_cache", default=1, type=int,
                         help="use processed data cache")
+    parser.add_argument("--num_workers", type=int, default=0, help="num workers for dataloader")
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--amp", action="store_true")
     parser.add_argument("--model_dir", type=str, default=None)
