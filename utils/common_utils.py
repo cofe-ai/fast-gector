@@ -4,7 +4,7 @@ from utils.mismatched_utils import *
 from src.dataset import MyCollate, Seq2EditDataset
 from torch.utils.data import DataLoader
 import json
-
+import torch.multiprocessing as mp
 
 def read_config(path):
     with open(path, "r", encoding="utf8") as fr:
@@ -12,8 +12,19 @@ def read_config(path):
     return config
 
 
+def init_sampler(dataset, shuffle: bool, is_distributed: bool):
+    if is_distributed:
+        sampler = torch.utils.data.DistributedSampler(dataset=dataset,
+                                     shuffle=shuffle,
+                                     drop_last=True)
+    else:
+        sampler = None
+    return sampler
+
+
 def init_dataloader(subset,
                     data_path,
+                    num_workers,
                     use_cache,
                     tokenizer,
                     vocab,
@@ -45,19 +56,37 @@ def init_dataloader(subset,
         shuffle = True
     else:
         shuffle = False
+    
+    is_distributed = torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1
 
-    sampler = torch.utils.data.distributed.DistributedSampler(
-        sub_dataset, shuffle=shuffle, drop_last=True)
+    sampler = init_sampler(dataset=sub_dataset,
+                        shuffle=shuffle,
+                        is_distributed=is_distributed)
+    
+    if is_distributed:
+        # sampler option is mutually exclusive with shuffle
+        shuffle = None
+    
+    # When supported, use 'forkserver' to spawn dataloader workers instead of 'fork' to prevent
+    # issues with Infiniband implementations that are not fork-safe
+    kwargs = dict()
+    if (is_distributed and num_workers > 0 and hasattr(mp, '_supports_context') and
+            mp._supports_context and 'forkserver' in mp.get_all_start_methods()):
+        kwargs['multiprocessing_context'] = 'forkserver'
+        
     data_loader = DataLoader(
-        sub_dataset,
+        dataset=sub_dataset,
         batch_size=batch_size,
-        shuffle=False,
-        pin_memory=False,
+        shuffle=shuffle,
+        pin_memory=True,
         collate_fn=my_collate_fn,
-        num_workers=0,
-        sampler=sampler
+        num_workers=num_workers,
+        sampler=sampler,
+        **kwargs
     )
     return data_loader
+
+
 
 
 @contextmanager
