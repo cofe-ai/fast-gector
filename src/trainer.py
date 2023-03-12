@@ -50,12 +50,18 @@ class Trainer:
         self.vocab = Seq2EditVocab(
             args.detect_vocab_path, args.correct_vocab_path, unk2keep=bool(args.unk2keep))
         self.base_tokenizer = AutoTokenizer.from_pretrained(
-            args.pretrained_transformer_path, use_fast=False)
+            args.pretrained_transformer_path, do_basic_tokenize=False)
+        self.base_tokenizer_vocab = self.base_tokenizer.get_vocab()
         if bool(args.special_tokens_fix):  # for roberta
             self.base_tokenizer.add_tokens([START_TOKEN], special_tokens=True)
-            self.base_tokenizer.vocab[START_TOKEN] = self.base_tokenizer.unk_token_id
+            # set start_token to unk_token_id is no longer supported via transformers tokenizer
+            # since access the vocab is implemented by calling get_vocab() which create a new instance,
+            # in this case, we cannot actually change the vocab.
+            # Instead, we can get the vocab and change it, then use it directly later on.
+            # self.base_tokenizer.vocab[START_TOKEN] = self.base_tokenizer.unk_token_id
+            self.base_tokenizer_vocab[START_TOKEN] = self.base_tokenizer.unk_token_id
         self.mismatched_tokenizer = MisMatchedTokenizer(
-            self.base_tokenizer, self.max_len, self.max_pieces_per_token)
+            self.base_tokenizer, self.base_tokenizer_vocab, self.max_len, self.max_pieces_per_token)
 
         model = GECToRModel(
             encoder_path=args.pretrained_transformer_path,

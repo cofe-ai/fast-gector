@@ -6,8 +6,9 @@ import torch
 
 
 class MisMatchedTokenizer:
-    def __init__(self, tokenizer, max_len, max_pieces_per_token=None, special_start_token_ids=[], special_end_token_ids=[]):
+    def __init__(self, tokenizer, tokenizer_vocab, max_len, max_pieces_per_token=None, special_start_token_ids=[], special_end_token_ids=[]):
         self.tokenizer = tokenizer
+        self.tokenizer_vocab = tokenizer_vocab
         self.max_len = max_len
         self.max_pieces_per_token = max_pieces_per_token
         self.special_start_token_ids = special_start_token_ids
@@ -18,7 +19,7 @@ class MisMatchedTokenizer:
         offsets = []
         for word in words:
             wordpieces = self.tokenizer.tokenize(word)
-            wordpiece_ids = [self.tokenizer.vocab[wordpiece]
+            wordpiece_ids = [self.tokenizer_vocab[wordpiece]
                              for wordpiece in wordpieces]
             # we set ovv token's wordpiece id to unk_token_id,
             # thus we can deal with it as normal tokens
