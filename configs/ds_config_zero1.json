@@ -13,9 +13,12 @@
     "fp16": {
         "enabled": false
     },
+    "zero_optimization": {
+        "stage": 1,
+        "reduce_bucket_size": 5e8,
+        "allgather_bucket_size": 5e8
+    },
     "amp": {
-        "enabled": true,
-        "opt_level": "O1",
-        "loss_scale": "dynamic"
+        "enabled": false
     }
 }

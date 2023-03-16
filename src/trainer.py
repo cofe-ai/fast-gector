@@ -2,6 +2,8 @@
 import torch
 from transformers import AutoTokenizer
 from transformers.optimization import get_linear_schedule_with_warmup
+from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
+from deepspeed.runtime.fp16.fused_optimizer import FP16_Optimizer
 from utils.mismatched_utils import *
 from utils.common_utils import init_dataloader, read_config, torch_distributed_master_process_first
 from src.dataset import Seq2EditVocab
@@ -26,6 +28,8 @@ class Trainer:
         if args.wandb:
             self.use_wandb = True
             wandb.init(project="gec", group="ddp")
+        else:
+            self.use_wandb = False
         self.num_epochs = args.num_epochs
         self.train_batch_size = args.train_batch_size
         self.valid_batch_size = args.valid_batch_size
@@ -155,9 +159,12 @@ class Trainer:
         return config
 
     def init_scheduler(self, optimizer, num_steps_per_epoch, warmup_ratio):
+        torch_optimizer = optimizer
+        if isinstance(optimizer, (DeepSpeedZeroOptimizer, FP16_Optimizer)):
+            torch_optimizer = optimizer.optimizer
         total_train_steps = num_steps_per_epoch * self.num_epochs
         lr_scheduler = get_linear_schedule_with_warmup(
-            optimizer=optimizer,
+            optimizer=torch_optimizer,
             num_warmup_steps=total_train_steps * warmup_ratio,
             num_training_steps=total_train_steps,
         )
@@ -166,8 +173,8 @@ class Trainer:
 
     def setup_model_optimizer_and_scheduler(self, model, config, num_steps_per_epoch, warmup):
         model, optimizer, _, _ = deepspeed.initialize(model=model,
-                                                                             model_parameters=model.parameters(),
-                                                                             config=config)
+                                                        model_parameters=model.parameters(),
+                                                        config=config)
         lr_scheduler = self.init_scheduler(optimizer=optimizer,
                                         num_steps_per_epoch=num_steps_per_epoch,
                                         warmup_ratio=warmup)
@@ -212,7 +219,8 @@ class Trainer:
                 self.model.eval()
 
                 valid_loss, valid_acc = self._valid_epoch()
-                wandb.log({"valid loss": valid_loss, "valid acc": valid_acc})
+                if self.use_wandb:
+                    wandb.log({"valid loss": valid_loss, "valid acc": valid_acc})
                 with torch_distributed_master_process_first(torch.distributed.get_rank()):
                     metrics = self.eval_model(
                         epoch, train_loss, valid_loss, valid_acc)
@@ -263,7 +271,7 @@ class Trainer:
                     else:
                         update_steps = self.log_interval
                     pbar.update(update_steps)
-                    if self.use_wandb:
+                    if self.use_wandb is True:
                         wandb.log(info)
         epoch_loss /= len(self.train_loader)
         return epoch_loss
