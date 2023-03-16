@@ -69,10 +69,10 @@ def init_dataloader(subset,
     
     # When supported, use 'forkserver' to spawn dataloader workers instead of 'fork' to prevent
     # issues with Infiniband implementations that are not fork-safe
-    kwargs = dict()
-    if (is_distributed and num_workers > 0 and hasattr(mp, '_supports_context') and
-            mp._supports_context and 'forkserver' in mp.get_all_start_methods()):
-        kwargs['multiprocessing_context'] = 'forkserver'
+    # kwargs = dict()
+    # if (is_distributed and num_workers > 0 and hasattr(mp, '_supports_context') and
+    #         mp._supports_context and 'forkserver' in mp.get_all_start_methods()):
+    #     kwargs['multiprocessing_context'] = 'forkserver'
     
     # set pin_memory to True seems to cause more GPU memory are cached, 
     # which may lead to OOM.
@@ -85,7 +85,7 @@ def init_dataloader(subset,
         collate_fn=my_collate_fn,
         num_workers=num_workers,
         sampler=sampler,
-        **kwargs
+        # **kwargs
     )
     return data_loader
 
