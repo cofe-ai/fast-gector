@@ -196,7 +196,8 @@ class Trainer:
         self.encoder_requires_grad = True
 
         for epoch in range(self.num_epochs):
-            self.train_loader.sampler.set_epoch(epoch)
+            if isinstance(self.train_loader.sampler, torch.utils.data.DistributedSampler):
+                self.train_loader.sampler.set_epoch(epoch)
             self.model.train()
             if self.cold_step_count:
 
