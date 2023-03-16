@@ -73,12 +73,15 @@ def init_dataloader(subset,
     if (is_distributed and num_workers > 0 and hasattr(mp, '_supports_context') and
             mp._supports_context and 'forkserver' in mp.get_all_start_methods()):
         kwargs['multiprocessing_context'] = 'forkserver'
-        
+    
+    # set pin_memory to True seems to cause more GPU memory are cached, 
+    # which may lead to OOM.
+    # Thus, we disable it as a temporary solution
     data_loader = DataLoader(
         dataset=sub_dataset,
         batch_size=batch_size,
         shuffle=shuffle,
-        pin_memory=True,
+        pin_memory=False,
         collate_fn=my_collate_fn,
         num_workers=num_workers,
         sampler=sampler,
