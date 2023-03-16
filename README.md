@@ -9,9 +9,9 @@ Note: To make it faster and more readable, we remove allennlp dependencies and r
 
 1. Install Pytorch with cuda support
     ```
-    conda create -n gector_env python=3.7.6 -y
+    conda create -n gector_env python=3.9 -y
     conda activate gector_env
-    conda install pytorch=1.10.1 cudatoolkit -c pytorch
+    conda install pytorch=1.12.1 cudatoolkit==11.3 -c pytorch
     ```
 
 2. Install **NVIDIA-Apex** (for using amp with deepspeed)
@@ -22,11 +22,10 @@ Note: To make it faster and more readable, we remove allennlp dependencies and r
     ```
 3. Install following packages by conda/pip
     ```bash
-    python==3.7.6
-    transformers==4.14.1
+    transformers==4.26.1
     scikit-learn==1.0.2
-    numpy==1.21.2
-    deepspeed==0.5.10
+    numpy==1.24.2
+    deepspeed==0.8.2
     ```
 
 ## Preprocess Data
