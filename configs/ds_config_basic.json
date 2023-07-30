@@ -12,8 +12,5 @@
     "gradient_clipping": 1.0,
     "fp16": {
         "enabled": false
-    },
-    "amp": {
-        "enabled": false
     }
 }
