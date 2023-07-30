@@ -6,10 +6,6 @@ from torch.utils.data import DataLoader
 import json
 import torch.multiprocessing as mp
 
-def read_config(path):
-    with open(path, "r", encoding="utf8") as fr:
-        config = json.load(fr)
-    return config
 
 
 def init_sampler(dataset, shuffle: bool, is_distributed: bool):
@@ -88,17 +84,3 @@ def init_dataloader(subset,
         # **kwargs
     )
     return data_loader
-
-
-
-
-@contextmanager
-def torch_distributed_master_process_first(local_rank: int):
-    """
-    Decorator to make all processes in distributed training wait for each local_master to do something.
-    """
-    if local_rank not in [-1, 0]:
-        torch.distributed.barrier()
-    yield
-    if local_rank == 0:
-        torch.distributed.barrier()

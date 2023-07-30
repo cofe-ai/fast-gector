@@ -12,19 +12,14 @@ def main(args):
 
 if __name__ == "__main__":
     parser = ArgumentParser()
-    parser.add_argument(
-        "--config_path", help="path to deepspeed config json", default="./deepspeed_config.json")
     parser.add_argument("--local_rank", type=int, default=-1)
     parser.add_argument("--max_len", type=int, default=128)
     parser.add_argument("--max_pieces_per_token", type=int, default=5)
-    parser.add_argument("--train_batch_size", type=int, required=True)
-    parser.add_argument("--accumulation_size", type=int, default=1)
     parser.add_argument("--valid_batch_size", type=int, required=True)
     parser.add_argument("--num_epochs", type=int, required=True)
     parser.add_argument("--tp_prob", type=float, default=1)
     parser.add_argument("--tn_prob", type=float, default=1)
     parser.add_argument("--additional_confidence", type=float, default=0.0)
-    parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--cold_lr", type=float, default=1e-3)
     parser.add_argument("--warmup", type=float, default=0.1)
     parser.add_argument("--dp_rate", type=float, default=0.0)
@@ -45,16 +40,16 @@ if __name__ == "__main__":
                         help="use processed data cache")
     parser.add_argument("--num_workers", type=int, default=0, help="num workers for dataloader")
     parser.add_argument("--fp16", action="store_true")
-    parser.add_argument("--amp", action="store_true")
     parser.add_argument("--model_dir", type=str, default=None)
     parser.add_argument("--ckpt_id", type=str, default=None)
     parser.add_argument("--save_dir", type=str, required=True)
     parser.add_argument("--pretrained_transformer_path",
                         type=str, required=True)   
     parser.add_argument("--log_interval", type=int, default=10)
-    parser = deepspeed.add_config_arguments(parser)
     parser.add_argument("--wandb", action="store_true", help="use wandb logger")
     parser.add_argument("--wandb_key", type=str, default="", help="wandb key to login")
+    parser = deepspeed.add_config_arguments(parser)
+
     args = parser.parse_args()
     if args.wandb:
         if args.wandb_key:
