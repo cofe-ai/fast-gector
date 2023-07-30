@@ -1,11 +1,13 @@
 # -*- coding:UTF-8 -*-
 import torch
+import torch.distributed as dist
+from deepspeed.utils.groups import _get_data_parallel_group
 from transformers import AutoTokenizer
 from transformers.optimization import get_linear_schedule_with_warmup
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from deepspeed.runtime.fp16.fused_optimizer import FP16_Optimizer
 from utils.mismatched_utils import *
-from utils.common_utils import init_dataloader, read_config, torch_distributed_master_process_first
+from utils.data_utils import init_dataloader
 from src.dataset import Seq2EditVocab
 from utils.helpers import INCORRECT_LABEL, KEEP_LABEL, PAD_LABEL, START_TOKEN
 from src.model import GECToRModel
@@ -20,24 +22,22 @@ import wandb
 class Trainer:
     def __init__(self, args):
 
-        self.use_amp = args.amp
         self.fix_seed()
         deepspeed.init_distributed()
         self.device = self.setup_device(args.local_rank)
+        self.n_gpus = dist.get_world_size()
         self.log_interval = args.log_interval
         if args.wandb:
             self.use_wandb = True
             wandb.init(project="gec", group="ddp")
         else:
             self.use_wandb = False
+        self.import_ds_config_hyper_params(args.deepspeed_config)
         self.num_epochs = args.num_epochs
-        self.train_batch_size = args.train_batch_size
-        self.valid_batch_size = args.valid_batch_size
+        self.valid_batch_size = args.valid_batch_size # 
         self.do_eval = args.do_eval
-        self.lr = args.lr
         self.cold_lr = args.cold_lr
         self.cold_step_count = args.cold_step_count
-        self.accumulation_size = args.accumulation_size
         self.max_len = args.max_len
         self.max_pieces_per_token = args.max_pieces_per_token
         self.tp_prob = args.tp_prob
@@ -124,18 +124,25 @@ class Trainer:
             print("dev set: ", len(self.valid_loader.dataset))
 
 
-        config = self.modify_ds_config(args)
-        
+        self.total_training_steps = int(len(self.train_loader) // self.gradient_accumulation_steps * self.num_epochs)
+        print(f"set total training steps to {self.total_training_steps}")
         self.model, self.optimizer, self.lr_scheduler = \
             self.setup_model_optimizer_and_scheduler(
                                                     model=model, 
-                                                    config=config, 
-                                                    num_steps_per_epoch=len(self.train_loader), 
+                                                    config=args.deepspeed_config, 
+                                                    total_training_steps=self.total_training_steps,
                                                     warmup=args.warmup)
         
         self.best_accuracy = 0
         self.best_epoch = 0
         self.best_loss = float("inf")
+
+    def import_ds_config_hyper_params(self, config_path):
+        with open(config_path, "r", encoding="utf8") as fr:
+            config = json.load(fr)
+        self.train_batch_size = config.get("train_batch_size")
+        self.gradient_accumulation_steps = config.get("gradient_accumulation_steps")
+        self.lr = config["optimizer"].get("lr")
 
     def setup_device(self, local_rank=-1):
         if torch.cuda.is_available():
@@ -148,35 +155,24 @@ class Trainer:
         print(f"setup device: {device}")
         return device
 
-    def modify_ds_config(self, args):
-        config = read_config(args.config_path)
-        # total_batch_size = batch_size_per_gpu * accum_size * num_gpus
-        config["train_batch_size"] = self.train_batch_size * \
-            self.accumulation_size
-        config["gradient_accumulation_steps"] = args.accumulation_size
-        config["optimizer"]["params"]["lr"] = args.lr
-        config["amp"]["enabled"] = self.use_amp
-        return config
-
-    def init_scheduler(self, optimizer, num_steps_per_epoch, warmup_ratio):
+    def init_scheduler(self, optimizer, total_train_steps, warmup_ratio):
         torch_optimizer = optimizer
         if isinstance(optimizer, (DeepSpeedZeroOptimizer, FP16_Optimizer)):
             torch_optimizer = optimizer.optimizer
-        total_train_steps = num_steps_per_epoch * self.num_epochs
         lr_scheduler = get_linear_schedule_with_warmup(
             optimizer=torch_optimizer,
-            num_warmup_steps=total_train_steps * warmup_ratio,
+            num_warmup_steps=int(total_train_steps * warmup_ratio),
             num_training_steps=total_train_steps,
         )
         print("setup lr_scheduler")
         return lr_scheduler
 
-    def setup_model_optimizer_and_scheduler(self, model, config, num_steps_per_epoch, warmup):
+    def setup_model_optimizer_and_scheduler(self, model, config, total_training_steps: int, warmup: float):
         model, optimizer, _, _ = deepspeed.initialize(model=model,
                                                         model_parameters=model.parameters(),
                                                         config=config)
         lr_scheduler = self.init_scheduler(optimizer=optimizer,
-                                        num_steps_per_epoch=num_steps_per_epoch,
+                                        total_train_steps=total_training_steps,
                                         warmup_ratio=warmup)
         # load ckpt and reset lr
         if self.model_dir and self.ckpt_id:
@@ -207,9 +203,7 @@ class Trainer:
                     self.encoder_requires_grad = False
                 else:
                     if self.encoder_requires_grad == False:
-                        if self.use_amp:
-                            print("clean autocast cache...")
-                            torch.clear_autocast_cache()
+                        torch.clear_autocast_cache()
                         torch.cuda.empty_cache()
                         for param_group in self.optimizer.param_groups:
                             param_group['lr'] = self.lr
@@ -220,12 +214,21 @@ class Trainer:
                 self.model.eval()
 
                 valid_loss, valid_acc = self._valid_epoch()
+                torch.distributed.barrier() # sync here to make sure all ranks have metrics
                 if self.use_wandb:
-                    wandb.log({"valid loss": valid_loss, "valid acc": valid_acc})
-                with torch_distributed_master_process_first(torch.distributed.get_rank()):
-                    metrics = self.eval_model(
-                        epoch, train_loss, valid_loss, valid_acc)
+                    wandb.log({"valid loss": valid_loss, "valid acc": valid_acc}, step=epoch)
+                metrics = {"current_epoch": epoch, "train_loss": train_loss,
+                    "valid_loss": valid_loss, "valid_accuracy": valid_acc}
                 if torch.distributed.get_rank() == 0:
+                    if valid_loss < self.best_loss:
+                        self.best_loss = valid_loss
+                    if valid_acc > self.best_accuracy:
+                        self.best_accuracy = valid_acc
+                        self.best_epoch = epoch
+                    metrics["best_epoch"] = self.best_epoch
+                    metrics["best_valid_loss"] = self.best_loss
+                    metrics["best_valid_accuracy"] = self.best_accuracy
+                    self._save_metric(epoch, metrics)
                     print(metrics)
 
             self._save_ckpt(epoch)
@@ -237,22 +240,29 @@ class Trainer:
         with open(os.path.join(self.save_dir, f"metrics_epoch-{epoch}.json"), "w", encoding="utf8") as fw:
             fw.write(json.dumps(metrics, ensure_ascii=False, indent=2))
 
-    def is_overflow(self):
-        if hasattr(self.optimizer, "overflow"):
-            return self.optimizer.overflow
-
     def _train_epoch(self):
         epoch_loss = 0
-        num_steps_per_epoch = len(self.train_loader)
-        pbar = tqdm(self.train_loader)
-        
-        for step, batch in enumerate(pbar):
+        num_steps_per_epoch = len(self.train_loader) // self.gradient_accumulation_steps
+        # drop last step at the end of training 
+        # if the last step cannot accumulate the same num of batches as before 
+        # in order to keep the global batch size unchanged
+        if len(self.train_loader) % self.gradient_accumulation_steps > 0:
+            drop_last_step = True
+        else:
+            drop_last_step = False
+
+        pbar = tqdm(total=num_steps_per_epoch)
+        step = 0
+        for batch in self.train_loader:
             for k, v in batch.items():
                 batch[k] = v.to(self.device)
             outputs = self.model(batch, self.encoder_requires_grad)
 
             loss = outputs["loss"]
-            # TODO: figure out why nan loss encountered using amp in distributed training
+            if self.n_gpus > 1:
+                loss = loss.mean() # mean across gpus
+            if self.gradient_accumulation_steps > 1:
+                loss = loss / self.gradient_accumulation_steps # loss avg across gradient accumulation steps
             self.model.backward(loss)
             self.model.step()
             loss_i = loss.detach().item()
@@ -264,7 +274,7 @@ class Trainer:
                 else:
                     current_lr = self.cold_lr
                 
-                if step % self.log_interval == 0 or step == num_steps_per_epoch - 1:
+                if (step + 1) % self.log_interval == 0 or step == num_steps_per_epoch - 1:
                     info = {'loss': loss_i, 'lr': current_lr}
                     pbar.set_postfix(info)
                     if step == num_steps_per_epoch - 1:
@@ -272,30 +282,13 @@ class Trainer:
                     else:
                         update_steps = self.log_interval
                     pbar.update(update_steps)
-                    if self.use_wandb is True:
-                        wandb.log(info)
-        epoch_loss /= len(self.train_loader)
+                    if self.use_wandb:
+                        wandb.log(info, step=step)
+                if step >= num_steps_per_epoch - 1 or (step == num_steps_per_epoch -2 and drop_last_step):
+                    break
+                step += 1
+        epoch_loss /= num_steps_per_epoch
         return epoch_loss
-
-    def eval_model(self, epoch, train_loss, valid_loss, valid_acc):
-        metric_path = os.path.join(
-            self.save_dir, f"metrics_epoch-{epoch}.json")
-        if os.path.exists(metric_path):
-            with open(metric_path, "r", encoding="utf8") as fr:
-                metrics = json.load(fr)
-        else:
-            metrics = {"current_epoch": epoch, "train_loss": train_loss,
-                       "valid_loss": valid_loss, "valid_accuracy": valid_acc}
-            if valid_loss < self.best_loss:
-                self.best_loss = valid_loss
-            if valid_acc > self.best_accuracy:
-                self.best_accuracy = valid_acc
-                self.best_epoch = epoch
-            metrics["best_epoch"] = self.best_epoch
-            metrics["best_valid_loss"] = self.best_loss
-            metrics["best_valid_accuracy"] = self.best_accuracy
-            self._save_metric(epoch, metrics)
-        return metrics
 
     def _valid_epoch(self):
 
@@ -308,8 +301,9 @@ class Trainer:
                     batch[k] = v.to(self.device)
                 outputs = self.model(batch)
                 loss = outputs["loss"]
-                loss = loss / torch.distributed.get_world_size()
-                epoch_loss += loss.detach().item()
+                if self.n_gpus > 1:
+                    loss = loss.mean()
+                epoch_loss += loss.detach()
                 batch_word_mask = batch["word_mask"].cpu().bool()
                 batch_pred_label_probs = outputs["class_probabilities_labels"].detach(
                 ).cpu()
@@ -322,13 +316,16 @@ class Trainer:
                     batch["correct_tag_ids"].cpu(), batch_word_mask).tolist()
                 all_gold_labels.extend(batch_gold_labels)
             epoch_loss /= len(self.valid_loader)
-            acc = accuracy_score(all_gold_labels, all_pred_labels)
+            acc = torch.tensor(accuracy_score(all_gold_labels, all_pred_labels), dtype=torch.float64).cuda()
+            # all reduce across dp
+            dist.all_reduce(epoch_loss, op=dist.ReduceOp.AVG, group=_get_data_parallel_group())
+            dist.all_reduce(acc, op=dist.ReduceOp.AVG, group=_get_data_parallel_group())
+        epoch_loss = epoch_loss.item()
+        acc = acc.item()
         return epoch_loss, acc
 
     def fix_seed(self):
         torch.manual_seed(1)
-        if not self.use_amp:
-            torch.backends.cudnn.enabled = False
         torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.deterministic = True
         seed(43)
