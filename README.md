@@ -63,7 +63,7 @@ bash scripts/train.sh
 - It’s also possible to further reduce the memory usage. For example, you can use FP16 data types for training efficiently at the cost of lower precision. Furthermore, deepspeed’s zero optimizations can also be used alone / together in distributed training. Note that for small models, higher zero stages may not help. For most cases, zero1 (optimizer states partitioning) is enough.
     
     
-    | global batch size | n_gpus | use fp16 | use zero | MaxMemAllocated (CUDA) | Per GPU Mem Usage (NVIDIA-SMI) |
+    | global batch size | n_gpus | use fp16 | use zero1 | MaxMemAllocated (CUDA) | Per GPU Mem Usage (NVIDIA-SMI) |
     | --- | --- | --- | --- | --- | --- |
     | 256 | 1 | False | False | 65.21GB | 69864MiB |
     | 256 | 1 | True | False | 35.18GB | 38594MiB |
