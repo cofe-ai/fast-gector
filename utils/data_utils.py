@@ -7,12 +7,11 @@ import json
 import torch.multiprocessing as mp
 
 
-
 def init_sampler(dataset, shuffle: bool, is_distributed: bool):
     if is_distributed:
         sampler = torch.utils.data.DistributedSampler(dataset=dataset,
                                      shuffle=shuffle,
-                                     drop_last=True)
+                                     drop_last=True) # if True, then the sampler will drop the tail of the data to make it evenly divisible across the number of replicas (world size).
     else:
         sampler = None
     return sampler
@@ -54,7 +53,7 @@ def init_dataloader(subset,
         shuffle = False
     
     is_distributed = torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1
-
+    print(f"is distributed: {is_distributed}, thus we use {'distributed sampler' if is_distributed else 'default sampler'}")
     sampler = init_sampler(dataset=sub_dataset,
                         shuffle=shuffle,
                         is_distributed=is_distributed)
@@ -81,6 +80,7 @@ def init_dataloader(subset,
         collate_fn=my_collate_fn,
         num_workers=num_workers,
         sampler=sampler,
+        drop_last=True, # set to True to drop the last incomplete batch, if the dataset size is not divisible by the batch size. 
         # **kwargs
     )
     return data_loader
