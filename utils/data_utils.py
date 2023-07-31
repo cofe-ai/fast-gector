@@ -35,7 +35,7 @@ def init_dataloader(subset,
                     tp_prob=1,
                     tn_prob=1):
 
-    my_collate_fn = MyCollate(input_pad_id, detect_pad_id, correct_pad_id)
+    my_collate_fn = MyCollate(max_len, input_pad_id, detect_pad_id, correct_pad_id)
 
     sub_dataset = Seq2EditDataset(data_path,
                                   use_cache,
@@ -77,7 +77,7 @@ def init_dataloader(subset,
         dataset=sub_dataset,
         batch_size=batch_size,
         shuffle=shuffle,
-        pin_memory=False,
+        pin_memory=True,
         collate_fn=my_collate_fn,
         num_workers=num_workers,
         sampler=sampler,

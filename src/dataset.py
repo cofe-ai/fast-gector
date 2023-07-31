@@ -165,7 +165,8 @@ class Seq2EditDataset(Dataset):
 
 
 class MyCollate:
-    def __init__(self, input_pad_id, detect_pad_id, correct_pad_id):
+    def __init__(self, max_len, input_pad_id, detect_pad_id, correct_pad_id):
+        self.max_len = max_len
         self.input_pad_id = input_pad_id
         self.detect_pad_id = detect_pad_id
         self.correct_pad_id = correct_pad_id
@@ -200,10 +201,8 @@ class MyCollate:
 
     def __call__(self, batch):
 
-        max_len = max([len(i["input_ids"]) for i in batch])
-
         for item in batch:
-            item = self.pad_instance(item, max_len)
+            item = self.pad_instance(item, self.max_len)
 
         keys = item.keys()
 
