@@ -100,7 +100,6 @@ class Trainer:
             tp_prob=self.tp_prob,
             tn_prob=self.tn_prob)
         print("train set: ", len(self.train_loader.dataset))
-
         self.valid_loader = None
         if args.do_eval:
             self.valid_loader = init_dataloader(
@@ -122,7 +121,6 @@ class Trainer:
                 tp_prob=self.tp_prob,
                 tn_prob=self.tn_prob)
             print("dev set: ", len(self.valid_loader.dataset))
-
 
         self.total_training_steps = int(len(self.train_loader) // self.gradient_accumulation_steps * self.num_epochs)
         print(f"set total training steps to {self.total_training_steps}")
@@ -317,9 +315,10 @@ class Trainer:
                 all_gold_labels.extend(batch_gold_labels)
             epoch_loss /= len(self.valid_loader)
             acc = torch.tensor(accuracy_score(all_gold_labels, all_pred_labels), dtype=torch.float64).cuda()
-            # all reduce across dp
-            dist.all_reduce(epoch_loss, op=dist.ReduceOp.AVG, group=_get_data_parallel_group())
-            dist.all_reduce(acc, op=dist.ReduceOp.AVG, group=_get_data_parallel_group())
+            # all reduce across dp to get full metrics
+            if torch.is_distributed() and dist.get_world_size() > 1:
+                dist.all_reduce(epoch_loss, op=dist.ReduceOp.AVG, group=_get_data_parallel_group())
+                dist.all_reduce(acc, op=dist.ReduceOp.AVG, group=_get_data_parallel_group())
         epoch_loss = epoch_loss.item()
         acc = acc.item()
         return epoch_loss, acc
