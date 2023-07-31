@@ -19,6 +19,7 @@ import deepspeed
 import wandb
 from deepspeed.utils.logging import log_dist
 from deepspeed import comm
+
 class Trainer:
     def __init__(self, args):
 
@@ -92,7 +93,7 @@ class Trainer:
             detect_pad_id=self.vocab.detect_vocab["tag2id"][PAD_LABEL],
             correct_pad_id=self.vocab.correct_vocab["tag2id"][PAD_LABEL],
             max_len=self.max_len,
-            batch_size=int(self.train_batch_size / self.n_gpus),
+            batch_size=int(self.train_batch_size // self.gradient_accumulation_steps // self.n_gpus),
             tag_strategy=self.tag_strategy,
             skip_complex=self.skip_complex,
             skip_correct=self.skip_correct,
@@ -112,7 +113,7 @@ class Trainer:
                 detect_pad_id=self.vocab.detect_vocab["tag2id"][PAD_LABEL],
                 correct_pad_id=self.vocab.correct_vocab["tag2id"][PAD_LABEL],
                 max_len=self.max_len,
-                batch_size=int(self.valid_batch_size / self.n_gpus),
+                batch_size=int(self.train_batch_size // self.n_gpus),
                 tag_strategy=self.tag_strategy,
                 skip_complex=self.skip_complex,
                 skip_correct=self.skip_correct,
@@ -148,7 +149,7 @@ class Trainer:
                 device = torch.device("cuda")
         else:
             device = torch.device("cpu")
-        log_dist(f"setup device: {device}", ranks=[0])
+        log_dist(f"setup device: {device}", ranks=[comm.get_world_rank_from_launcher()])
         return device
 
     def init_scheduler(self, optimizer, total_train_steps, warmup_ratio):
@@ -204,7 +205,6 @@ class Trainer:
                         for param_group in self.optimizer.param_groups:
                             param_group['lr'] = self.lr
                         self.encoder_requires_grad = True
-
             train_loss = self._train_epoch()
             if self.do_eval:
                 self.model.eval()
@@ -324,6 +324,7 @@ class Trainer:
 
     def fix_seed(self):
         torch.manual_seed(1)
-        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.enabled = True
+        torch.backends.cudnn.benchmark = True
         torch.backends.cudnn.deterministic = True
         seed(43)
