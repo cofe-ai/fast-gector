@@ -1,6 +1,5 @@
 # -*- coding:UTF-8 -*-
 import torch
-import torch.distributed as dist
 from deepspeed.utils.groups import _get_data_parallel_group
 from transformers import AutoTokenizer
 from transformers.optimization import get_linear_schedule_with_warmup
@@ -18,6 +17,8 @@ import os
 import json
 import deepspeed
 import wandb
+from deepspeed.utils.logging import log_dist
+from deepspeed import comm
 
 class Trainer:
     def __init__(self, args):
@@ -25,7 +26,7 @@ class Trainer:
         self.fix_seed()
         deepspeed.init_distributed()
         self.device = self.setup_device(args.local_rank)
-        self.n_gpus = dist.get_world_size()
+        self.n_gpus = comm.get_world_size()
         self.log_interval = args.log_interval
         if args.wandb:
             self.use_wandb = True
@@ -92,15 +93,13 @@ class Trainer:
             detect_pad_id=self.vocab.detect_vocab["tag2id"][PAD_LABEL],
             correct_pad_id=self.vocab.correct_vocab["tag2id"][PAD_LABEL],
             max_len=self.max_len,
-            batch_size=int(self.train_batch_size /
-                           torch.distributed.get_world_size()),
+            batch_size=int(self.train_batch_size // self.gradient_accumulation_steps // self.n_gpus),
             tag_strategy=self.tag_strategy,
             skip_complex=self.skip_complex,
             skip_correct=self.skip_correct,
             tp_prob=self.tp_prob,
             tn_prob=self.tn_prob)
-        print("train set: ", len(self.train_loader.dataset))
-
+        log_dist(f"# training dataset: {len(self.train_loader.dataset)}", ranks=[0])
         self.valid_loader = None
         if args.do_eval:
             self.valid_loader = init_dataloader(
@@ -114,18 +113,16 @@ class Trainer:
                 detect_pad_id=self.vocab.detect_vocab["tag2id"][PAD_LABEL],
                 correct_pad_id=self.vocab.correct_vocab["tag2id"][PAD_LABEL],
                 max_len=self.max_len,
-                batch_size=int(self.valid_batch_size /
-                               torch.distributed.get_world_size()),
+                batch_size=int(self.train_batch_size // self.n_gpus),
                 tag_strategy=self.tag_strategy,
                 skip_complex=self.skip_complex,
                 skip_correct=self.skip_correct,
                 tp_prob=self.tp_prob,
                 tn_prob=self.tn_prob)
-            print("dev set: ", len(self.valid_loader.dataset))
-
+            log_dist(f"# validation dataset: {len(self.valid_loader.dataset)}", ranks=[0])
 
         self.total_training_steps = int(len(self.train_loader) // self.gradient_accumulation_steps * self.num_epochs)
-        print(f"set total training steps to {self.total_training_steps}")
+        log_dist(f"set total training steps to {self.total_training_steps}", ranks=[0])
         self.model, self.optimizer, self.lr_scheduler = \
             self.setup_model_optimizer_and_scheduler(
                                                     model=model, 
@@ -146,13 +143,13 @@ class Trainer:
 
     def setup_device(self, local_rank=-1):
         if torch.cuda.is_available():
-            if torch.distributed.is_initialized() and local_rank != -1:
+            if comm.is_initialized() and local_rank != -1:
                 device = torch.device("cuda", local_rank)
             else:
                 device = torch.device("cuda")
         else:
             device = torch.device("cpu")
-        print(f"setup device: {device}")
+        log_dist(f"setup device: {device}", ranks=[comm.get_world_rank_from_launcher()])
         return device
 
     def init_scheduler(self, optimizer, total_train_steps, warmup_ratio):
@@ -164,7 +161,7 @@ class Trainer:
             num_warmup_steps=int(total_train_steps * warmup_ratio),
             num_training_steps=total_train_steps,
         )
-        print("setup lr_scheduler")
+        log_dist(f"setup lr_scheduler {lr_scheduler}", ranks=[0])
         return lr_scheduler
 
     def setup_model_optimizer_and_scheduler(self, model, config, total_training_steps: int, warmup: float):
@@ -177,12 +174,12 @@ class Trainer:
         # load ckpt and reset lr
         if self.model_dir and self.ckpt_id:
             model.load_checkpoint(self.model_dir, self.ckpt_id)
-            print(f"load model from {self.model_dir}")
+            log_dist(f"load model from {self.model_dir}", ranks=[0])
             for param_group in optimizer.param_groups:
                 param_group['lr'] = self.lr
 
         else:
-            print("no model checkpoint found, train from beginning...")
+            log_dist("no model checkpoint found, train from beginning...", ranks=[0])
         return model, optimizer, lr_scheduler
 
     def train(self):
@@ -208,18 +205,17 @@ class Trainer:
                         for param_group in self.optimizer.param_groups:
                             param_group['lr'] = self.lr
                         self.encoder_requires_grad = True
-
             train_loss = self._train_epoch()
             if self.do_eval:
                 self.model.eval()
 
                 valid_loss, valid_acc = self._valid_epoch()
-                torch.distributed.barrier() # sync here to make sure all ranks have metrics
+                comm.barrier() # sync here to make sure all ranks have metrics
                 if self.use_wandb:
                     wandb.log({"valid loss": valid_loss, "valid acc": valid_acc}, step=epoch)
                 metrics = {"current_epoch": epoch, "train_loss": train_loss,
                     "valid_loss": valid_loss, "valid_accuracy": valid_acc}
-                if torch.distributed.get_rank() == 0:
+                if comm.get_rank() == 0:
                     if valid_loss < self.best_loss:
                         self.best_loss = valid_loss
                     if valid_acc > self.best_accuracy:
@@ -229,7 +225,7 @@ class Trainer:
                     metrics["best_valid_loss"] = self.best_loss
                     metrics["best_valid_accuracy"] = self.best_accuracy
                     self._save_metric(epoch, metrics)
-                    print(metrics)
+                    log_dist(f"evaluation results: {metrics}", ranks=[0])
 
             self._save_ckpt(epoch)
 
@@ -317,15 +313,18 @@ class Trainer:
                 all_gold_labels.extend(batch_gold_labels)
             epoch_loss /= len(self.valid_loader)
             acc = torch.tensor(accuracy_score(all_gold_labels, all_pred_labels), dtype=torch.float64).cuda()
-            # all reduce across dp
-            dist.all_reduce(epoch_loss, op=dist.ReduceOp.AVG, group=_get_data_parallel_group())
-            dist.all_reduce(acc, op=dist.ReduceOp.AVG, group=_get_data_parallel_group())
+            # all reduce across dp to get full metrics
+            if comm.is_initialized() and comm.get_world_size() > 1:
+                comm.all_reduce(epoch_loss, op=comm.ReduceOp.AVG, group=_get_data_parallel_group())
+                comm.all_reduce(acc, op=comm.ReduceOp.AVG, group=_get_data_parallel_group())
+
         epoch_loss = epoch_loss.item()
         acc = acc.item()
         return epoch_loss, acc
 
     def fix_seed(self):
         torch.manual_seed(1)
-        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.enabled = True
+        torch.backends.cudnn.benchmark = True
         torch.backends.cudnn.deterministic = True
         seed(43)
