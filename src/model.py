@@ -74,8 +74,8 @@ class GECToRModel(nn.Module):
 
         correct_logits = self.correct_proj_layer(self.dropout(embeddings))
         detect_logits = self.detect_proj_layer(embeddings)
-        correct_probs = F.softmax(correct_logits, dim=-1)
-        detect_probs = F.softmax(detect_logits, dim=-1)
+        correct_probs = F.softmax(correct_logits, dim=-1).detach()
+        detect_probs = F.softmax(detect_logits, dim=-1).detach()
         # shape: (bsz, seq_len)
         detect_incorrect_probs = detect_probs[:, :,
                                               self.detect_incorrect_id] * input_dict["word_mask"]
@@ -95,7 +95,6 @@ class GECToRModel(nn.Module):
                 correct_logits.view(-1, self.num_correct_tags), correct_tag_target_ids.view(-1))
             detect_loss = self.detect_loss_fn(
                 detect_logits.view(-1, self.num_detect_tags), detect_tag_target_ids.view(-1))
-
             total_loss = correct_loss + detect_loss
         output_dict = {"logits_labels": correct_logits,
                        "logits_d_tags": detect_logits,
