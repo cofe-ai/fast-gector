@@ -5,7 +5,8 @@ from src.dataset import MyCollate, Seq2EditDataset
 from torch.utils.data import DataLoader
 import json
 import torch.multiprocessing as mp
-
+from deepspeed.utils.logging import log_dist
+from deepspeed import comm
 
 def init_sampler(dataset, shuffle: bool, is_distributed: bool):
     if is_distributed:
@@ -52,8 +53,8 @@ def init_dataloader(subset,
     else:
         shuffle = False
     
-    is_distributed = torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1
-    print(f"is distributed: {is_distributed}, thus we use {'distributed sampler' if is_distributed else 'default sampler'}")
+    is_distributed = comm.is_initialized() and comm.get_world_size() > 1
+    log_dist(f"is distributed: {is_distributed}, thus we use {'distributed sampler' if is_distributed else 'default sampler'}", ranks=[0])
     sampler = init_sampler(dataset=sub_dataset,
                         shuffle=shuffle,
                         is_distributed=is_distributed)

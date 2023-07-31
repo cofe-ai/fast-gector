@@ -8,7 +8,7 @@ from tqdm import tqdm
 import pickle
 import re
 import os
-
+from deepspeed.utils.logging import log_dist
 
 class Seq2EditVocab:
     def __init__(self, d_vocab_path, c_vocab_path, unk2keep=False):
@@ -53,7 +53,7 @@ class Seq2EditDataset(Dataset):
         self.tp_prob = tp_prob
         self.vocab = vocab
         if use_cache and os.path.exists(data_path+".pkl"):
-            print("Data cache found, we'll load pkl...")
+            log_dist("Data cache found, we'll load pkl...", ranks=[0])
             self.data = self.load_data_from_pkl(data_path+".pkl")
         else:
 
