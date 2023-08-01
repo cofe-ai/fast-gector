@@ -7,6 +7,7 @@ valid_path="dev.edits"
 config_path="configs/ds_config_basic.json"
 timestamp=`date "+%Y%0m%0d_%T"`
 save_dir="../ckpts/ckpt_$timestamp"
+tensorboard_dir="log/tb/gector_${timestamp}"
 pretrained_transformer_path="./pretrained_models/bert-base-uncased"
 mkdir -p $save_dir
 cp $0 $save_dir
@@ -37,9 +38,8 @@ run_cmd="deepspeed --hostfile configs/hostfile --master_port 49828 train.py \
     --use_cache 1 \
     --save_dir $save_dir \
     --pretrained_transformer_path $pretrained_transformer_path \
+    --tensorboard_dir $tensorboard_dir \
     2>&1 | tee ${save_dir}/train-${timestamp}.log"
 
-#     --wandb \
-# --wandb_key $WANDB_KEY \
 echo ${run_cmd}
 eval ${run_cmd}

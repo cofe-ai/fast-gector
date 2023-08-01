@@ -16,23 +16,22 @@ from random import seed
 import os
 import json
 import deepspeed
-import wandb
 from deepspeed.utils.logging import log_dist
 from deepspeed import comm
+from torch.utils.tensorboard import SummaryWriter
 
 class Trainer:
     def __init__(self, args):
-
+        
         self.fix_seed()
         deepspeed.init_distributed()
         self.device = self.setup_device(args.local_rank)
         self.n_gpus = comm.get_world_size()
         self.log_interval = args.log_interval
-        if args.wandb:
-            self.use_wandb = True
-            wandb.init(project="gec", group="ddp")
-        else:
-            self.use_wandb = False
+        # to ensure each process has a summary writer
+        self.summary_writer = None
+        if comm.get_rank() == 0:
+            self.summary_writer = SummaryWriter(log_dir=args.tensorboard_dir) if args.tensorboard_dir is not None else None 
         self.import_ds_config_hyper_params(args.deepspeed_config)
         self.num_epochs = args.num_epochs
         self.valid_batch_size = args.valid_batch_size # 
@@ -187,7 +186,7 @@ class Trainer:
             os.mkdir(self.save_dir)
 
         self.encoder_requires_grad = True
-
+        global_train_step = 0 # init a global step
         for epoch in range(self.num_epochs):
             if isinstance(self.train_loader.sampler, torch.utils.data.DistributedSampler):
                 self.train_loader.sampler.set_epoch(epoch)
@@ -205,14 +204,15 @@ class Trainer:
                         for param_group in self.optimizer.param_groups:
                             param_group['lr'] = self.lr
                         self.encoder_requires_grad = True
-            train_loss = self._train_epoch()
+            train_loss, global_train_step = self._train_epoch(global_train_step)
             if self.do_eval:
                 self.model.eval()
 
                 valid_loss, valid_acc = self._valid_epoch()
                 comm.barrier() # sync here to make sure all ranks have metrics
-                if self.use_wandb:
-                    wandb.log({"valid loss": valid_loss, "valid acc": valid_acc}, step=epoch)
+                if self.summary_writer is not None:
+                    self.summary_writer.add_scalar("Loss/valid", valid_loss, epoch)
+                    self.summary_writer.add_scalar("Acc/valid", valid_acc, epoch)
                 metrics = {"current_epoch": epoch, "train_loss": train_loss,
                     "valid_loss": valid_loss, "valid_accuracy": valid_acc}
                 if comm.get_rank() == 0:
@@ -236,7 +236,7 @@ class Trainer:
         with open(os.path.join(self.save_dir, f"metrics_epoch-{epoch}.json"), "w", encoding="utf8") as fw:
             fw.write(json.dumps(metrics, ensure_ascii=False, indent=2))
 
-    def _train_epoch(self):
+    def _train_epoch(self, global_train_step):
         epoch_loss = 0
         num_steps_per_epoch = len(self.train_loader) // self.gradient_accumulation_steps
         # drop last step at the end of training 
@@ -271,20 +271,22 @@ class Trainer:
                     current_lr = self.cold_lr
                 
                 if (step + 1) % self.log_interval == 0 or step == num_steps_per_epoch - 1:
-                    info = {'loss': loss_i, 'lr': current_lr}
+                    info = {'Loss/train': loss_i, 'lr': current_lr}
                     pbar.set_postfix(info)
                     if step == num_steps_per_epoch - 1:
                         update_steps = step % self.log_interval
                     else:
                         update_steps = self.log_interval
                     pbar.update(update_steps)
-                    if self.use_wandb:
-                        wandb.log(info, step=step)
+                    if self.summary_writer is not None:
+                        for metric, value in info.items():
+                            self.summary_writer.add_scalar(metric, value, global_step=global_train_step)
                 if step >= num_steps_per_epoch - 1 or (step == num_steps_per_epoch -2 and drop_last_step):
                     break
                 step += 1
+                global_train_step += 1
         epoch_loss /= num_steps_per_epoch
-        return epoch_loss
+        return epoch_loss, global_train_step
 
     def _valid_epoch(self):
 

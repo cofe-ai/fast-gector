@@ -46,13 +46,8 @@ if __name__ == "__main__":
     parser.add_argument("--pretrained_transformer_path",
                         type=str, required=True)   
     parser.add_argument("--log_interval", type=int, default=10)
-    parser.add_argument("--wandb", action="store_true", help="use wandb logger")
-    parser.add_argument("--wandb_key", type=str, default="", help="wandb key to login")
+    parser.add_argument("--tensorboard_dir", type=str, default=None, help="path to save tensorboard args")
     parser = deepspeed.add_config_arguments(parser)
 
     args = parser.parse_args()
-    if args.wandb:
-        if args.wandb_key:
-            import wandb
-            wandb.login(key=args.wandb_key)
     main(args)
