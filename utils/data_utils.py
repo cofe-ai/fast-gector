@@ -27,7 +27,7 @@ def init_dataloader(subset,
                     input_pad_id,
                     detect_pad_id,
                     correct_pad_id,
-                    max_len,
+                    max_num_tokens,
                     batch_size,
                     tag_strategy,
                     skip_complex,
@@ -35,13 +35,13 @@ def init_dataloader(subset,
                     tp_prob=1,
                     tn_prob=1):
 
-    my_collate_fn = MyCollate(max_len, input_pad_id, detect_pad_id, correct_pad_id)
+    my_collate_fn = MyCollate(max_num_tokens, input_pad_id, detect_pad_id, correct_pad_id)
 
     sub_dataset = Seq2EditDataset(data_path,
                                   use_cache,
                                   tokenizer,
                                   vocab,
-                                  max_len,
+                                  max_num_tokens,
                                   tag_strategy,
                                   skip_complex,
                                   skip_correct,

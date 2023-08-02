@@ -13,7 +13,7 @@ def main(args):
 if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--local_rank", type=int, default=-1)
-    parser.add_argument("--max_len", type=int, default=128)
+    parser.add_argument("--max_num_tokens", type=int, default=128)
     parser.add_argument("--max_pieces_per_token", type=int, default=5)
     parser.add_argument("--valid_batch_size", type=int, required=True)
     parser.add_argument("--num_epochs", type=int, required=True)
@@ -46,6 +46,8 @@ if __name__ == "__main__":
     parser.add_argument("--pretrained_transformer_path",
                         type=str, required=True)   
     parser.add_argument("--log_interval", type=int, default=10)
+    parser.add_argument("--eval_interval", type=int, default=50)
+    parser.add_argument("--save_interval", type=int, default=None)
     parser.add_argument("--tensorboard_dir", type=str, default=None, help="path to save tensorboard args")
     parser = deepspeed.add_config_arguments(parser)
 

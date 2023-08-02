@@ -7,31 +7,36 @@ from utils.helpers import INCORRECT_LABEL, KEEP_LABEL, PAD_LABEL, START_TOKEN, U
 from src.model import GECToRModel
 from random import seed
 import deepspeed
-
+import os
 
 class Predictor:
     def __init__(self, args):
-        self.use_amp = args.amp
-        print(f"amp: {self.use_amp}")
         self.fix_seed()
         deepspeed.init_distributed()
         self.device = args.device if args.device else (
             "cuda" if torch.cuda.is_available() else "cpu")
         self.iteration_count = args.iteration_count
-        self.min_len = args.min_len
-        self.max_len = args.max_len
+        self.min_seq_len = args.min_seq_len
+        self.max_num_tokens = args.max_num_tokens
         self.min_error_probability = args.min_error_probability
         self.max_pieces_per_token = args.max_pieces_per_token
         self.vocab = Seq2EditVocab(
-            args.detect_vocab_path, args.correct_vocab_path)
+            args.detect_vocab_path, args.correct_vocab_path, unk2keep=bool(args.unk2keep))
         self.base_tokenizer = AutoTokenizer.from_pretrained(
-            args.pretrained_transformer_path, use_fast=False)
+            args.pretrained_transformer_path, do_basic_tokenize=False)
+        self.base_tokenizer_vocab = self.base_tokenizer.get_vocab()
         if bool(args.special_tokens_fix):  # for roberta
             self.base_tokenizer.add_tokens([START_TOKEN], special_tokens=True)
-            self.base_tokenizer.vocab[START_TOKEN] = self.base_tokenizer.unk_token_id
+            # set start_token to unk_token_id is no longer supported via transformers tokenizer
+            # since access the vocab is implemented by calling get_vocab() which create a new instance,
+            # in this case, we cannot actually change the vocab.
+            # Instead, we can get the vocab and change it, then use it directly later on.
+            # self.base_tokenizer.vocab[START_TOKEN] = self.base_tokenizer.unk_token_id
+            self.base_tokenizer_vocab[START_TOKEN] = self.base_tokenizer.unk_token_id
         self.mismatched_tokenizer = MisMatchedTokenizer(
-            self.base_tokenizer, self.max_len, self.max_pieces_per_token)
+            self.base_tokenizer, self.base_tokenizer_vocab, self.max_pieces_per_token)
         self.collate_fn = MyCollate(
+            max_len=self.max_num_tokens,
             input_pad_id=self.base_tokenizer.pad_token_id,
             detect_pad_id=self.vocab.detect_vocab["tag2id"][PAD_LABEL],
             correct_pad_id=self.vocab.correct_vocab["tag2id"][PAD_LABEL])
@@ -54,7 +59,8 @@ class Predictor:
         )
         ds_engine, _, _, _ = deepspeed.initialize(
             args=args, model=model, model_parameters=model.parameters())
-        ds_engine.load_checkpoint(args.model_dir, args.ckpt_id)
+        load_dir, tag = os.path.split(args.ckpt_path)
+        ds_engine.load_checkpoint(load_dir=load_dir, tag=tag, load_module_only=True, load_optimizer_states=False, load_lr_scheduler_states=False)
 
         return ds_engine
 
@@ -63,15 +69,15 @@ class Predictor:
         # {sent idx: sent}, used for stop iter early
         prev_preds_dict = {idx: [sent] for idx, sent in enumerate(final_batch)}
         short_skip_id_set = set([idx for idx, sent in enumerate(
-            final_batch) if len(sent) < self.min_len])
-        # idxs for len(sent) > min_len
+            final_batch) if len(sent) < self.min_seq_len])
+        # idxs for len(sent) > min_seq_len
         pred_ids = [idx for idx in range(
             len(full_batch)) if idx not in short_skip_id_set]
         total_updates = 0
 
         for n_iter in range(self.iteration_count):
             ori_batch = [final_batch[i] for i in pred_ids]
-            batch_input_dict = self.preprocess(ori_batch)
+            batch_input_dict, truncated_seq_lengths = self.preprocess(ori_batch)
             if not batch_input_dict:
                 break
             label_probs, label_ids, max_detect_incor_probs = self.predict(
@@ -79,7 +85,7 @@ class Predictor:
             del batch_input_dict
             # list of sents(each sent is a list of target tokens)
             pred_batch = self.postprocess(
-                ori_batch, label_probs, label_ids, max_detect_incor_probs)
+                ori_batch, truncated_seq_lengths, label_probs, label_ids, max_detect_incor_probs)
 
             final_batch, pred_ids, cnt = \
                 self.update_final_batch(final_batch, pred_ids, pred_batch,
@@ -103,27 +109,26 @@ class Predictor:
         seq_lens = [len(seq) for seq in seqs if seq]
         if not seq_lens:
             return []
-        # +1 for [START_TOKEN]
-        max_len = min(max(seq_lens)+1, self.max_len)
         input_dict_batch = []
-        for tokens in seqs:
-            tokens = [START_TOKEN] + tokens
-            tokens = tokens[:max_len]
-            input_ids, offsets = self.mismatched_tokenizer.encode(tokens)
-            input_dict = self.build_input_dict(input_ids, offsets, len(tokens))
+        truncated_seq_lengths = []
+        for words in seqs:
+            words = [START_TOKEN] + words
+            input_ids, offsets, truncated_seq_length = self.mismatched_tokenizer.encode(words, add_special_tokens=False, max_tokens=self.max_num_tokens)
+            words = words[:truncated_seq_length]
+            truncated_seq_lengths.append(truncated_seq_length)
+            input_dict = self.build_input_dict(input_ids, offsets, len(words))
             input_dict_batch.append(input_dict)
         batch_input_dict = self.collate_fn(input_dict_batch)
         for k, v in batch_input_dict.items():
             batch_input_dict[k] = v.to(self.device)
-        return batch_input_dict
+        return batch_input_dict, truncated_seq_lengths
 
-    def postprocess(self, batch, batch_label_probs, batch_label_ids, batch_incor_probs):
+    def postprocess(self, batch, truncated_seq_lengths, batch_label_probs, batch_label_ids, batch_incor_probs):
         keep_id = self.vocab.correct_vocab["tag2id"][KEEP_LABEL]
         all_results = []
-        for tokens, label_probs, label_ids, incor_prob in zip(batch, batch_label_probs,
+        for tokens, truncated_seq_length, label_probs, label_ids, incor_prob in zip(batch, truncated_seq_lengths, batch_label_probs,
                                                               batch_label_ids, batch_incor_probs):
             # since we add special tokens before truncation, max_len should minus 1. This is different from original gector.
-            length = min(len(tokens), self.max_len - 1)
             edits = []
 
             # skip the whole sent if all labels are $KEEP
@@ -136,7 +141,7 @@ class Predictor:
                 all_results.append(tokens)
                 continue
 
-            for idx in range(length + 1):
+            for idx in range(truncated_seq_length):
                 if idx == 0:
                     token = START_TOKEN
                 else:
@@ -206,7 +211,6 @@ class Predictor:
         token_type_ids = [0 for _ in range(len(input_ids))]
         attn_mask = [1 for _ in range(len(input_ids))]
         word_mask = [1 for _ in range(word_level_len)]
-
         input_dict = {
             "input_ids": input_ids,
             "token_type_ids": token_type_ids,
@@ -217,8 +221,7 @@ class Predictor:
 
     def fix_seed(self):
         torch.manual_seed(1)
-        if not self.use_amp:
-            torch.backends.cudnn.enabled = False
-        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.enabled = True
+        torch.backends.cudnn.benchmark = True
         torch.backends.cudnn.deterministic = True
         seed(43)

@@ -28,6 +28,8 @@ class Trainer:
         self.device = self.setup_device(args.local_rank)
         self.n_gpus = comm.get_world_size()
         self.log_interval = args.log_interval
+        self.eval_interval = args.eval_interval
+        
         # to ensure each process has a summary writer
         self.summary_writer = None
         if comm.get_rank() == 0:
@@ -38,7 +40,7 @@ class Trainer:
         self.do_eval = args.do_eval
         self.cold_lr = args.cold_lr
         self.cold_step_count = args.cold_step_count
-        self.max_len = args.max_len
+        self.max_num_tokens = args.max_num_tokens
         self.max_pieces_per_token = args.max_pieces_per_token
         self.tp_prob = args.tp_prob
         self.tn_prob = args.tn_prob
@@ -65,7 +67,7 @@ class Trainer:
             # self.base_tokenizer.vocab[START_TOKEN] = self.base_tokenizer.unk_token_id
             self.base_tokenizer_vocab[START_TOKEN] = self.base_tokenizer.unk_token_id
         self.mismatched_tokenizer = MisMatchedTokenizer(
-            self.base_tokenizer, self.base_tokenizer_vocab, self.max_len, self.max_pieces_per_token)
+            self.base_tokenizer, self.base_tokenizer_vocab, self.max_pieces_per_token)
 
         model = GECToRModel(
             encoder_path=args.pretrained_transformer_path,
@@ -91,7 +93,7 @@ class Trainer:
             input_pad_id=self.base_tokenizer.pad_token_id,
             detect_pad_id=self.vocab.detect_vocab["tag2id"][PAD_LABEL],
             correct_pad_id=self.vocab.correct_vocab["tag2id"][PAD_LABEL],
-            max_len=self.max_len,
+            max_num_tokens=self.max_num_tokens,
             batch_size=int(self.train_batch_size // self.gradient_accumulation_steps // self.n_gpus),
             tag_strategy=self.tag_strategy,
             skip_complex=self.skip_complex,
@@ -111,7 +113,7 @@ class Trainer:
                 input_pad_id=self.base_tokenizer.pad_token_id,
                 detect_pad_id=self.vocab.detect_vocab["tag2id"][PAD_LABEL],
                 correct_pad_id=self.vocab.correct_vocab["tag2id"][PAD_LABEL],
-                max_len=self.max_len,
+                max_num_tokens=self.max_num_tokens,
                 batch_size=int(self.train_batch_size // self.n_gpus),
                 tag_strategy=self.tag_strategy,
                 skip_complex=self.skip_complex,
@@ -121,6 +123,8 @@ class Trainer:
             log_dist(f"# validation dataset: {len(self.valid_loader.dataset)}", ranks=[0])
 
         self.total_training_steps = int(len(self.train_loader) // self.gradient_accumulation_steps * self.num_epochs)
+        # if save interval is not set by args, save at the end of each epoch
+        self.save_interval = args.save_interval if args.save_interval is not None else len(self.train_loader) // self.gradient_accumulation_steps
         log_dist(f"set total training steps to {self.total_training_steps}", ranks=[0])
         self.model, self.optimizer, self.lr_scheduler = \
             self.setup_model_optimizer_and_scheduler(
@@ -130,7 +134,7 @@ class Trainer:
                                                     warmup=args.warmup)
         
         self.best_accuracy = 0
-        self.best_epoch = 0
+        self.best_global_step = 0
         self.best_loss = float("inf")
 
     def import_ds_config_hyper_params(self, config_path):
@@ -205,35 +209,15 @@ class Trainer:
                             param_group['lr'] = self.lr
                         self.encoder_requires_grad = True
             train_loss, global_train_step = self._train_epoch(global_train_step)
-            if self.do_eval:
-                self.model.eval()
+            
 
-                valid_loss, valid_acc = self._valid_epoch()
-                comm.barrier() # sync here to make sure all ranks have metrics
-                if self.summary_writer is not None:
-                    self.summary_writer.add_scalar("Loss/valid", valid_loss, epoch)
-                    self.summary_writer.add_scalar("Acc/valid", valid_acc, epoch)
-                metrics = {"current_epoch": epoch, "train_loss": train_loss,
-                    "valid_loss": valid_loss, "valid_accuracy": valid_acc}
-                if comm.get_rank() == 0:
-                    if valid_loss < self.best_loss:
-                        self.best_loss = valid_loss
-                    if valid_acc > self.best_accuracy:
-                        self.best_accuracy = valid_acc
-                        self.best_epoch = epoch
-                    metrics["best_epoch"] = self.best_epoch
-                    metrics["best_valid_loss"] = self.best_loss
-                    metrics["best_valid_accuracy"] = self.best_accuracy
-                    self._save_metric(epoch, metrics)
-                    log_dist(f"evaluation results: {metrics}", ranks=[0])
+            
 
-            self._save_ckpt(epoch)
+    def _save_ckpt(self, global_step):
+        self.model.save_checkpoint(self.save_dir, f"globalstep-{global_step}")
 
-    def _save_ckpt(self, epoch):
-        self.model.save_checkpoint(self.save_dir, f"epoch-{epoch}")
-
-    def _save_metric(self, epoch, metrics):
-        with open(os.path.join(self.save_dir, f"metrics_epoch-{epoch}.json"), "w", encoding="utf8") as fw:
+    def _save_metric(self, global_step, metrics):
+        with open(os.path.join(self.save_dir, f"metrics_globalstep-{global_step}.json"), "w", encoding="utf8") as fw:
             fw.write(json.dumps(metrics, ensure_ascii=False, indent=2))
 
     def _train_epoch(self, global_train_step):
@@ -283,14 +267,37 @@ class Trainer:
                             self.summary_writer.add_scalar(metric, value, global_step=global_train_step)
                 if step >= num_steps_per_epoch - 1 or (step == num_steps_per_epoch -2 and drop_last_step):
                     break
+                
+                if self.do_eval and (global_train_step + 1) % self.eval_interval == 0:
+                    self.model.eval()
+                    valid_loss, valid_acc = self.evaluate()
+                    comm.barrier() # sync here to make sure all ranks have metrics
+                    if self.summary_writer is not None:
+                        self.summary_writer.add_scalar("Loss/valid", valid_loss, global_train_step)
+                        self.summary_writer.add_scalar("Acc/valid", valid_acc, global_train_step)
+                    metrics = {"current_global_step": global_train_step, "current_train_loss": epoch_loss / (step + 1),
+                        "valid_loss": valid_loss, "valid_accuracy": valid_acc}
+                    if comm.get_rank() == 0:
+                        if valid_loss < self.best_loss:
+                            self.best_loss = valid_loss
+                        if valid_acc > self.best_accuracy:
+                            self.best_accuracy = valid_acc
+                            self.best_global_step = global_train_step
+                        metrics["best_global_step"] = self.best_global_step
+                        metrics["best_valid_loss"] = self.best_loss
+                        metrics["best_valid_accuracy"] = self.best_accuracy
+                        self._save_metric(global_train_step, metrics)
+                        log_dist(f"evaluation results: {metrics}", ranks=[0])
+                if (global_train_step + 1) % self.save_interval == 0:
+                    self._save_ckpt(global_train_step)
                 step += 1
                 global_train_step += 1
         epoch_loss /= num_steps_per_epoch
         return epoch_loss, global_train_step
 
-    def _valid_epoch(self):
+    def evaluate(self):
 
-        epoch_loss = 0
+        valid_loss = 0
         all_pred_labels = list()
         all_gold_labels = list()
         with torch.no_grad():
@@ -301,7 +308,7 @@ class Trainer:
                 loss = outputs["loss"]
                 if self.n_gpus > 1:
                     loss = loss.mean()
-                epoch_loss += loss.detach()
+                valid_loss += loss.detach()
                 batch_word_mask = batch["word_mask"].cpu().bool()
                 batch_pred_label_probs = outputs["class_probabilities_labels"].detach(
                 ).cpu()
@@ -313,16 +320,16 @@ class Trainer:
                 batch_gold_labels = torch.masked_select(
                     batch["correct_tag_ids"].cpu(), batch_word_mask).tolist()
                 all_gold_labels.extend(batch_gold_labels)
-            epoch_loss /= len(self.valid_loader)
+            valid_loss /= len(self.valid_loader)
             acc = torch.tensor(accuracy_score(all_gold_labels, all_pred_labels), dtype=torch.float64).cuda()
             # all reduce across dp to get full metrics
             if comm.is_initialized() and comm.get_world_size() > 1:
-                comm.all_reduce(epoch_loss, op=comm.ReduceOp.AVG, group=_get_data_parallel_group())
+                comm.all_reduce(valid_loss, op=comm.ReduceOp.AVG, group=_get_data_parallel_group())
                 comm.all_reduce(acc, op=comm.ReduceOp.AVG, group=_get_data_parallel_group())
 
-        epoch_loss = epoch_loss.item()
+        valid_loss = valid_loss.item()
         acc = acc.item()
-        return epoch_loss, acc
+        return valid_loss, acc
 
     def fix_seed(self):
         torch.manual_seed(1)
