@@ -42,11 +42,11 @@ class Tag2idVocab:
 
 
 class Seq2EditDataset(Dataset):
-    def __init__(self, data_path, use_cache, tokenizer, vocab, max_len, tag_strategy, skip_complex=0, skip_correct=0, tp_prob=1, tn_prob=1):
+    def __init__(self, data_path, use_cache, tokenizer, vocab, max_num_tokens, tag_strategy, skip_complex=0, skip_correct=0, tp_prob=1, tn_prob=1):
         super().__init__()
         self.tokenizer = tokenizer
         self.tag_strategy = tag_strategy
-        self.max_len = max_len
+        self.max_num_tokens = max_num_tokens
         self.skip_complex = bool(skip_complex)
         self.skip_correct = bool(skip_correct)
         self.tn_prob = tn_prob
@@ -84,11 +84,10 @@ class Seq2EditDataset(Dataset):
                 if words and words[0] != START_TOKEN:
                     words = [START_TOKEN] + words
 
-                if self.max_len is not None:
-                    words = words[:self.max_len]
-                    tags = tags[:self.max_len]
-
-                input_ids, offsets = self.tokenizer.encode(words)
+                # truncate according to max num of tokens to ensure all the input ids get same length after padding
+                input_ids, offsets, truncated_seq_length = self.tokenizer.encode(words, add_special_tokens=False, max_tokens=self.max_num_tokens)
+                words = words[:truncated_seq_length]
+                tags = tags[:truncated_seq_length]
                 instance = self.build_instance(words, input_ids, offsets, tags)
                 if instance:
                     data.append(instance["inputs"])
@@ -209,6 +208,6 @@ class MyCollate:
         batch_dict = dict()
         for key in keys:
             value = torch.tensor([item[key]
-                                 for item in batch], dtype=torch.long)
+                                for item in batch], dtype=torch.long)
             batch_dict[key] = value
         return batch_dict

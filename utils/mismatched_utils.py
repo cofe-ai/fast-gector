@@ -4,19 +4,20 @@ A tweak version of Allennlp's pretrained_transformer_mismatched_indexer/embedder
 """
 import torch
 
-
 class MisMatchedTokenizer:
-    def __init__(self, tokenizer, tokenizer_vocab, max_len, max_pieces_per_token=None, special_start_token_ids=[], special_end_token_ids=[]):
+    def __init__(self, tokenizer, tokenizer_vocab, max_pieces_per_token=None, special_start_token_ids=[]):
         self.tokenizer = tokenizer
         self.tokenizer_vocab = tokenizer_vocab
-        self.max_len = max_len
         self.max_pieces_per_token = max_pieces_per_token
         self.special_start_token_ids = special_start_token_ids
-        self.special_end_token_ids = special_end_token_ids
 
-    def encode(self, words: list, add_special_tokens=False):
+    def encode(self, words: list, add_special_tokens=False, max_tokens=None):
+        truncated_seq_length = 0
         input_ids = []
         offsets = []
+        num_tokens = 0
+        if max_tokens and add_special_tokens:
+            max_tokens -= len(self.special_start_token_ids)
         for word in words:
             wordpieces = self.tokenizer.tokenize(word)
             wordpiece_ids = [self.tokenizer_vocab[wordpiece]
@@ -27,17 +28,21 @@ class MisMatchedTokenizer:
                 wordpiece_ids = [self.tokenizer.unk_token_id]
             elif (self.max_pieces_per_token is not None):
                 wordpiece_ids = wordpiece_ids[:self.max_pieces_per_token]
+            num_tokens += len(wordpiece_ids)
+            if max_tokens and num_tokens > max_tokens:
+                break
             offsets.append((len(input_ids), len(
                 input_ids)+len(wordpiece_ids)-1))
             input_ids.extend(wordpiece_ids)
+            truncated_seq_length += 1
         if add_special_tokens:
             offsets = self._increment_offsets(
                 offsets, len(self.special_start_token_ids))
             input_ids = self._add_special_tokens(input_ids)
-        return input_ids, offsets
+        return input_ids, offsets, truncated_seq_length
 
     def _add_special_tokens(self, input_ids):
-        return self.special_start_token_ids + input_ids + self.special_end_token_ids
+        return self.special_start_token_ids + input_ids
 
     def _increment_offsets(self, offsets, increment):
         return [(offset[0] + increment, offset[1]+increment) for offset in offsets]

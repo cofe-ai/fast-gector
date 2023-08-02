@@ -39,8 +39,7 @@ def main(args):
     predictor = Predictor(args)
     total_corrections = []
     cnt_corrections = 0
-    print(f"model path: {args.model_dir}")
-    print(f"ckpt id: {args.ckpt_id}")
+    print(f"model path: {args.ckpt_path}")
     print("start predicting ...")
     s = time.time()
     if args.out_path:
@@ -75,18 +74,17 @@ def main(args):
 if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--local_rank", type=int)
-    parser.add_argument("--amp", action="store_true")
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--batch_size", type=int, required=True)
     parser.add_argument("--iteration_count", type=int, default=5)
-    parser.add_argument("--min_len", type=int, default=3)
-    parser.add_argument("--max_len", type=int, default=128)
+    parser.add_argument("--min_seq_len", type=int, default=3, help="<= min_seq_len will be skipped")
+    parser.add_argument("--max_num_tokens", type=int, default=128, help="max seq length after tokenization")
     parser.add_argument("--min_error_probability", type=float, default=0.0)
     parser.add_argument("--additional_confidence", type=float, default=0.0)
     parser.add_argument("--sub_token_mode", type=str, default="average")
     parser.add_argument("--max_pieces_per_token", type=int, default=5)
-    parser.add_argument("--model_dir", type=str, required=True)
-    parser.add_argument("--ckpt_id", type=str, required=True)
+    parser.add_argument("--unk2keep", type=int, default=0, help="replace oov label with keep")
+    parser.add_argument("--ckpt_path", type=str, required=True)
     parser.add_argument("--detect_vocab_path", type=str, required=True)
     parser.add_argument("--correct_vocab_path", type=str, required=True)
     parser.add_argument("--pretrained_transformer_path",
