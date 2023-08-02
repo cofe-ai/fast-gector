@@ -18,7 +18,14 @@ Note: To make it faster and more readable, we remove allennlp dependencies and r
 2. Generate edits from parallel sents `bash scripts/prepare_data.sh`
 3. (Optional) Define your own target vocab (data/vocabulary/labels.txt)
 
-## 4. Training
+## 4. Configuration
+
+- We use deepspeed configs to support distributed training and fp16/bf16 data types. Please refer to the [deepspeed config-json](https://www.deepspeed.ai/docs/config-json/) for more details.
+- We use max_num_tokens to limit the max length of a sequence after tokenization instead of max_len (in word level) as it's not aligned with 
+the length of input_ids and might be misleading.
+- `--segmented 1` should be used if your input file has spaces between words. If it's set to 0, it will split words by char.
+
+## 5. Training
 
 - Edit deepspeed_config.json according to your config params. Edit deepspeed_config.json according to your config params. lr, train_batch_size, gradient_accumulation_steps will be inherited from deepspeed config file.
 
@@ -73,7 +80,7 @@ bash scripts/train.sh
     | 256 | 8 | True | True | 4.64GB | 7610MiB |
 - There are other strategies to maximize hardware usage to gain a better performance. Check [https://www.deepspeed.ai/](https://www.deepspeed.ai/) for more details.
 
-## 5. Inference
+## 6. Inference
 
 - Edit deepspeed_config.json according to your config params 
 ```bash
